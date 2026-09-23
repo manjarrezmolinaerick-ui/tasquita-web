@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>La Tasquita de Zárate — Sistema de Pedidos</title>
+
+  <!-- Hoja de estilos: todo el diseño visual vive aquí -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Toda la aplicación se dibuja dentro de este contenedor.
+       El archivo script.js decide qué mostrar aquí según la pantalla activa. -->
+  <div id="app"></div>
+
+  <!-- El JavaScript se carga al final y con "defer" para que el HTML
+       ya exista en la página antes de que el script intente usarlo. -->
+  <!-- Librería oficial de Supabase (debe cargar antes que script.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+  <script src="script.js" defer></script>
+</body>
+</html>
