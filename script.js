@@ -250,17 +250,51 @@ function waiterLabel(id) {
   return w ? `${w.name} (${w.id})` : id;
 }
 
+/* ==================================================================
+   AVISOS AL USUARIO Y VALIDACIONES
+   mostrarMensaje: reemplaza a los catch(e){} vacíos. Cada vez que una
+   operación con Supabase falla (sin internet, dato inválido, etc.) el
+   usuario tiene que ENTERARSE, no solo quedar viendo como si nada
+   hubiera pasado. Por eso cada función *DB de abajo llama a esto
+   cuando { error } no es null, y además regresa true/false para que
+   quien la llamó sepa si de verdad se guardó o no.
+   ================================================================== */
+function mostrarMensaje(texto, tipo = 'error') {
+  const aviso = document.createElement('div');
+  aviso.className = `aviso aviso-${tipo}`;
+  aviso.textContent = texto;
+  document.body.appendChild(aviso);
+  setTimeout(() => aviso.remove(), 4000);
+}
+
+/* Revisa los datos de un platillo (se usa tanto al agregar como al
+   editar). Regresa una lista de errores; si está vacía, todo bien. */
+function validarPlatillo({ name, price, description }) {
+  const errores = [];
+  const precio = Number(price);
+  if (!name || name.trim() === '') errores.push('El nombre del platillo es obligatorio.');
+  else if (name.trim().length > 80) errores.push('El nombre no puede pasar de 80 caracteres.');
+  if (price === '' || price === undefined || isNaN(precio)) errores.push('El precio debe ser un número.');
+  else if (precio <= 0) errores.push('El precio debe ser mayor a 0.');
+  else if (precio > 10000) errores.push('El precio parece demasiado alto (máximo $10,000).');
+  if (description && description.length > 200) errores.push('La descripción no puede pasar de 200 caracteres.');
+  return errores;
+}
+
 async function insertMenuItemDB(item) {
   const { error } = await sb.from('platillos').insert(item);
-  if (error) console.error('Error al agregar platillo en Supabase:', error);
+  if (error) { console.error('Error al agregar platillo en Supabase:', error); mostrarMensaje('No se pudo guardar el platillo. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function updateMenuItemDB(id, fields) {
   const { error } = await sb.from('platillos').update(fields).eq('id', id);
-  if (error) console.error('Error al actualizar platillo en Supabase:', error);
+  if (error) { console.error('Error al actualizar platillo en Supabase:', error); mostrarMensaje('No se pudo actualizar el platillo. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function deleteMenuItemDB(id) {
   const { error } = await sb.from('platillos').delete().eq('id', id);
-  if (error) console.error('Error al borrar platillo en Supabase:', error);
+  if (error) { console.error('Error al borrar platillo en Supabase:', error); mostrarMensaje('No se pudo borrar el platillo. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function insertOrderDB(order) {
   const { error } = await sb.from('pedidos').insert({
@@ -271,27 +305,33 @@ async function insertOrderDB(order) {
     status: order.status,
     created_at: order.createdAt,
   });
-  if (error) console.error('Error al guardar pedido en Supabase:', error);
+  if (error) { console.error('Error al guardar pedido en Supabase:', error); return false; }
+  return true;
 }
 async function updateOrderStatusDB(id, status) {
   const { error } = await sb.from('pedidos').update({ status }).eq('id', id);
-  if (error) console.error('Error al actualizar pedido en Supabase:', error);
+  if (error) { console.error('Error al actualizar pedido en Supabase:', error); mostrarMensaje('No se pudo actualizar el estado del pedido. Revisa tu conexión.'); return false; }
+  return true;
 }
 async function markTablePaidDB(tableNum, waiterId) {
   const { error } = await sb.from('pedidos').update({ paid: true, waiter_id: waiterId }).eq('table_number', tableNum);
-  if (error) console.error('Error al marcar la mesa como cobrada en Supabase:', error);
+  if (error) { console.error('Error al marcar la mesa como cobrada en Supabase:', error); mostrarMensaje('No se pudo marcar la mesa como cobrada. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function insertWaiterDB(waiter) {
   const { error } = await sb.from('meseros').insert(waiter);
-  if (error) console.error('Error al agregar mesero en Supabase:', error);
+  if (error) { console.error('Error al agregar mesero en Supabase:', error); mostrarMensaje('No se pudo agregar al mesero. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function updateWaiterDB(id, fields) {
   const { error } = await sb.from('meseros').update(fields).eq('id', id);
-  if (error) console.error('Error al actualizar mesero en Supabase:', error);
+  if (error) { console.error('Error al actualizar mesero en Supabase:', error); mostrarMensaje('No se pudo actualizar al mesero. Intenta de nuevo.'); return false; }
+  return true;
 }
 async function deleteWaiterDB(id) {
   const { error } = await sb.from('meseros').delete().eq('id', id);
-  if (error) console.error('Error al borrar mesero en Supabase:', error);
+  if (error) { console.error('Error al borrar mesero en Supabase:', error); mostrarMensaje('No se pudo borrar al mesero. Intenta de nuevo.'); return false; }
+  return true;
 }
 
 /* ---------- Fusionar cambios en tiempo real dentro de la caché ---------- */
@@ -385,8 +425,15 @@ const state = {
   addingWaiter: false,
   salesTab: 'day',
   submitting: false,
+  pendingView: null,      // vista que se abrirá si el login es correcto
+  loginError: '',
+  loggingIn: false,
 };
 let selectedPayment = 'efectivo';
+/* Pantallas ya desbloqueadas en esta sesión (se reinicia si recargas
+   la página). No se guarda en localStorage a propósito: cada vez que
+   se abre el navegador de nuevo, vuelve a pedir la contraseña. */
+let unlockedViews = {};
 
 function setState(patch) {
   Object.assign(state, patch);
@@ -420,20 +467,56 @@ function renderHome() {
           <span>${ic('qr', 22)} Ordenar desde mi mesa</span>
           ${ic('chevronRight', 20)}
         </button>
-        <button class="role-btn role-btn--outline" data-action="go-kitchen">
+        <button class="role-btn role-btn--outline" data-action="request-access" data-target="kitchen">
           <span>${ic('chef', 22)} Pantalla de cocina</span>
           ${ic('chevronRight', 20)}
         </button>
-        <button class="role-btn role-btn--outline" data-action="go-waiter">
+        <button class="role-btn role-btn--outline" data-action="request-access" data-target="waiter">
           <span>${ic('receipt', 22)} Cuentas por mesa (mesero)</span>
           ${ic('chevronRight', 20)}
         </button>
-        <button class="role-btn role-btn--ghost" data-action="go-admin">
+        <button class="role-btn role-btn--ghost" data-action="request-access" data-target="admin">
           <span>${ic('settings', 22)} Panel de administración</span>
           ${ic('chevronRight', 20)}
         </button>
       </div>
       <p class="home-note">En producción, cada mesa tendría su propio código QR que abre directo la vista de "Ordenar" con el número de mesa incluido.</p>
+    </div>`;
+}
+
+/* ==================================================================
+   PANTALLA: LOGIN (cocina / mesero / admin)
+   Estas tres pantallas manejan operación y dinero del restaurante, así
+   que piden una contraseña compartida antes de entrar. La contraseña
+   nunca se guarda ni se compara en el navegador: se manda a una
+   función de la base de datos (verificar_acceso) que responde solo
+   true/false, así que ni con las herramientas de desarrollador se
+   puede ver la contraseña real. Una vez que la pones bien, se queda
+   desbloqueada mientras no cierres o recargues la página (por eso las
+   tablets de cocina/mesero normalmente se dejan encendidas todo el
+   turno).
+   ================================================================== */
+const ACCESS_LABELS = {
+  kitchen: { pantalla: 'cocina', titulo: 'Pantalla de cocina', icon: 'chef' },
+  waiter: { pantalla: 'mesero', titulo: 'Cuentas por mesa (mesero)', icon: 'receipt' },
+  admin: { pantalla: 'admin', titulo: 'Panel de administración', icon: 'settings' },
+};
+
+function renderLogin() {
+  const info = ACCESS_LABELS[state.pendingView] || {};
+  return `
+    <div class="login-screen">
+      <div class="login-card">
+        <div class="login-icon">${ic(info.icon || 'settings', 26)}</div>
+        <h1>${info.titulo || 'Acceso restringido'}</h1>
+        <p class="login-hint">Esta pantalla requiere la contraseña del personal.</p>
+        <input class="form-input" id="loginPassword" type="password" placeholder="Contraseña" autocomplete="off" ${state.loginError ? 'aria-invalid="true"' : ''} />
+        ${state.loginError ? `<p class="login-error">${state.loginError}</p>` : ''}
+        <button class="btn-navy login-submit-btn" data-action="login-submit" ${state.loggingIn ? 'disabled' : ''}>
+          ${state.loggingIn ? 'Verificando...' : 'Entrar'}
+        </button>
+        <button class="link-btn" data-action="go-home">Cancelar</button>
+      </div>
     </div>`;
 }
 
@@ -465,7 +548,7 @@ function renderCustomer() {
     <div class="customer-screen">
       <div class="customer-header">
         <div class="customer-header-row">
-          <button class="header-link" data-action="go-home">${ic('arrowLeft', 16)} Salir</button>
+          <span class="header-link-spacer"></span>
           <span class="header-label">Mesa ${state.table}</span>
           <button class="header-link" data-action="open-bill">${ic('receipt', 16)} Mi cuenta</button>
         </div>
@@ -782,9 +865,9 @@ function renderAdminCategory(cat) {
             return `
               <div class="menu-row">
                 <div class="menu-row-edit">
-                  <input class="form-input" id="editName" value="${item.name.replace(/"/g, '&quot;')}" placeholder="Nombre" />
-                  <input class="form-input" id="editPrice" type="number" value="${item.price}" placeholder="Precio" />
-                  <input class="form-input" id="editDesc" value="${(item.description || '').replace(/"/g, '&quot;')}" placeholder="Descripción" />
+                  <input class="form-input" id="editName" value="${item.name.replace(/"/g, '&quot;')}" placeholder="Nombre" required maxlength="80" />
+                  <input class="form-input" id="editPrice" type="number" value="${item.price}" placeholder="Precio" required min="0.01" max="10000" step="0.01" />
+                  <input class="form-input" id="editDesc" value="${(item.description || '').replace(/"/g, '&quot;')}" placeholder="Descripción" maxlength="200" />
                   <div class="admin-img-row">
                     ${item.image ? `
                       <img class="admin-img-preview" src="${item.image}" alt="" />
@@ -820,9 +903,9 @@ function renderAdminCategory(cat) {
 
       ${state.addingCat === cat ? `
         <div class="add-item-form">
-          <input class="form-input" id="newItemName" placeholder="Nombre del platillo" />
-          <input class="form-input" id="newItemPrice" type="number" placeholder="Precio" />
-          <input class="form-input" id="newItemDesc" placeholder="Descripción (opcional)" />
+          <input class="form-input" id="newItemName" placeholder="Nombre del platillo" required maxlength="80" />
+          <input class="form-input" id="newItemPrice" type="number" placeholder="Precio" required min="0.01" max="10000" step="0.01" />
+          <input class="form-input" id="newItemDesc" placeholder="Descripción (opcional)" maxlength="200" />
           <input class="form-input" id="newItemImage" type="file" accept="image/*" />
           <div class="add-actions">
             <button class="btn-navy" data-action="admin-add-save" data-cat="${cat}">Agregar</button>
@@ -846,7 +929,7 @@ function renderAdminWaiters() {
             return `
               <div class="menu-row">
                 <div class="menu-row-edit">
-                  <input class="form-input" id="editWaiterName" value="${w.name.replace(/"/g, '&quot;')}" placeholder="Nombre" />
+                  <input class="form-input" id="editWaiterName" value="${w.name.replace(/"/g, '&quot;')}" placeholder="Nombre" required maxlength="50" />
                   <div class="edit-actions">
                     <button class="btn-navy" data-action="admin-waiter-edit-save" data-id="${w.id}">Guardar</button>
                     <button class="btn-outline" data-action="admin-waiter-edit-cancel">Cancelar</button>
@@ -870,8 +953,8 @@ function renderAdminWaiters() {
 
       ${state.addingWaiter ? `
         <div class="add-item-form">
-          <input class="form-input" id="newWaiterId" placeholder="ID (ej. ID-1)" />
-          <input class="form-input" id="newWaiterName" placeholder="Nombre del mesero" />
+          <input class="form-input" id="newWaiterId" placeholder="ID (ej. ID-1)" required maxlength="20" />
+          <input class="form-input" id="newWaiterName" placeholder="Nombre del mesero" required maxlength="50" />
           <div class="add-actions">
             <button class="btn-navy" data-action="admin-waiter-add-save">Agregar</button>
             <button class="btn-outline" data-action="admin-waiter-add-cancel">Cancelar</button>
@@ -956,6 +1039,7 @@ function renderSalesReport() {
 function render() {
   const app = document.getElementById('app');
   if (state.view === 'home') app.innerHTML = renderHome();
+  else if (state.view === 'login') app.innerHTML = renderLogin();
   else if (state.view === 'tablePicker') app.innerHTML = renderTablePicker();
   else if (state.view === 'customer') app.innerHTML = renderCustomer();
   else if (state.view === 'kitchen') app.innerHTML = renderKitchen();
@@ -968,7 +1052,16 @@ function render() {
    Cada elemento clickeable tiene un atributo data-action que dice
    qué hacer; aquí se revisa cuál fue y se ejecuta.
    ================================================================== */
-document.addEventListener('click', function (e) {
+/* Enter en el campo de contraseña envía el login, igual que darle clic
+   al botón "Entrar" (sin esto habría que usar el mouse siempre). */
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && e.target && e.target.id === 'loginPassword') {
+    const btn = document.querySelector('[data-action="login-submit"]');
+    if (btn) btn.click();
+  }
+});
+
+document.addEventListener('click', async function (e) {
   const target = e.target.closest('[data-action]');
   if (!target) return;
   const action = target.dataset.action;
@@ -977,20 +1070,39 @@ document.addEventListener('click', function (e) {
     case 'modal-noop':
       break;
     case 'go-home':
-      setState({ view: 'home', table: null, cart: [] });
+      setState({ view: 'home', table: null, cart: [], pendingView: null, loginError: '' });
       break;
     case 'go-customer':
       setState({ view: 'tablePicker' });
       break;
-    case 'go-kitchen':
-      setState({ view: 'kitchen' });
+    case 'request-access': {
+      const targetView = target.dataset.target; // 'kitchen' | 'waiter' | 'admin'
+      if (unlockedViews[targetView]) {
+        setState({ view: targetView });
+      } else {
+        setState({ view: 'login', pendingView: targetView, loginError: '' });
+      }
       break;
-    case 'go-waiter':
-      setState({ view: 'waiter' });
+    }
+    case 'login-submit': {
+      if (state.loggingIn) break;
+      const targetView = state.pendingView;
+      const info = ACCESS_LABELS[targetView];
+      const pass = document.getElementById('loginPassword').value;
+      if (!pass) { setState({ loginError: 'Escribe la contraseña.' }); break; }
+      setState({ loggingIn: true, loginError: '' });
+      const { data, error } = await sb.rpc('verificar_acceso', { p_pantalla: info.pantalla, p_clave: pass });
+      if (error) {
+        console.error('Error al verificar acceso:', error);
+        setState({ loggingIn: false, loginError: 'No se pudo verificar la contraseña. Revisa tu conexión.' });
+      } else if (data === true) {
+        unlockedViews[targetView] = true;
+        setState({ view: targetView, pendingView: null, loggingIn: false, loginError: '' });
+      } else {
+        setState({ loggingIn: false, loginError: 'Contraseña incorrecta.' });
+      }
       break;
-    case 'go-admin':
-      setState({ view: 'admin' });
-      break;
+    }
     case 'pick-table':
       setState({ table: Number(target.dataset.table), view: 'customer' });
       break;
@@ -1040,6 +1152,11 @@ document.addEventListener('click', function (e) {
     }
     case 'add-to-cart': {
       const item = state.menu.find((m) => m.id === target.dataset.id);
+      if (!item || !item.available) {
+        mostrarMensaje('Este platillo ya no está disponible. El menú se actualizó.');
+        setState({ modalItemId: null });
+        break;
+      }
       const qty = Number(document.getElementById('modalQty').textContent);
       const notes = document.getElementById('modalNotes').value.trim();
       state.cart.push({ itemId: item.id, name: item.name, price: item.price, qty, notes });
@@ -1065,6 +1182,21 @@ document.addEventListener('click', function (e) {
       break;
     case 'submit-order': {
       if (state.submitting) break;
+      if (!state.cart || state.cart.length === 0) { mostrarMensaje('Tu carrito está vacío.'); break; }
+      const agotados = state.cart.filter((c) => {
+        const m = state.menu.find((x) => x.id === c.itemId);
+        return !m || !m.available;
+      });
+      if (agotados.length > 0) {
+        state.cart = state.cart.filter((c) => !agotados.includes(c));
+        setState({});
+        mostrarMensaje(`"${agotados[0].name}" ya no está disponible y se quitó de tu pedido. Revisa tu carrito.`);
+        break;
+      }
+      if (!navigator.onLine) {
+        mostrarMensaje('No hay conexión a internet. Revisa tu red e intenta de nuevo.');
+        break;
+      }
       const order = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         table: state.table,
@@ -1074,10 +1206,18 @@ document.addEventListener('click', function (e) {
         createdAt: Date.now(),
       };
       setState({ submitting: true });
-      ordersCache.push(order);
-      insertOrderDB(order).finally(() => {
+      const ok = await insertOrderDB(order);
+      if (ok) {
+        /* Solo se agrega a la caché local y se muestra "pedido enviado"
+           si Supabase confirmó que sí se guardó. Antes se hacía al
+           revés (optimista) y un pedido podía "enviarse" en pantalla
+           sin llegar nunca a la cocina si fallaba la conexión. */
+        ordersCache.push(order);
         setState({ cartOpen: false, cart: [], confirmedOrder: order, submitting: false });
-      });
+      } else {
+        mostrarMensaje('No se pudo enviar tu pedido. Intenta de nuevo o avisa al mesero.');
+        setState({ submitting: false });
+      }
       break;
     }
     case 'close-confirm':
@@ -1115,16 +1255,23 @@ document.addEventListener('click', function (e) {
     case 'admin-edit-save': {
       const id = target.dataset.id;
       const name = document.getElementById('editName').value.trim();
-      const price = Number(document.getElementById('editPrice').value);
+      const priceRaw = document.getElementById('editPrice').value;
+      const price = Number(priceRaw);
       const description = document.getElementById('editDesc').value.trim();
+      const errores = validarPlatillo({ name, price: priceRaw, description });
+      if (errores.length > 0) { mostrarMensaje(errores[0]); break; }
       const fileInput = document.getElementById('editImage');
       const file = fileInput && fileInput.files && fileInput.files[0];
-      const finishEdit = (imageValue) => {
+      const finishEdit = async (imageValue) => {
         const fields = { name, price, description };
         if (imageValue !== undefined) fields.image = imageValue;
-        state.menu = state.menu.map((m) => (m.id === id ? { ...m, ...fields } : m));
-        setState({ editingId: null });
-        updateMenuItemDB(id, fields);
+        const ok = await updateMenuItemDB(id, fields);
+        if (ok) {
+          state.menu = state.menu.map((m) => (m.id === id ? { ...m, ...fields } : m));
+          setState({ editingId: null });
+        } else {
+          setState({});
+        }
       };
       if (file) {
         readAndCompressImage(file).then(finishEdit).catch(() => finishEdit(undefined));
@@ -1165,16 +1312,22 @@ document.addEventListener('click', function (e) {
     case 'admin-add-save': {
       const cat = target.dataset.cat;
       const name = document.getElementById('newItemName').value.trim();
-      const price = Number(document.getElementById('newItemPrice').value);
+      const priceRaw = document.getElementById('newItemPrice').value;
+      const price = Number(priceRaw);
       const description = document.getElementById('newItemDesc').value.trim();
-      if (!name || !price) break;
+      const errores = validarPlatillo({ name, price: priceRaw, description });
+      if (errores.length > 0) { mostrarMensaje(errores[0]); break; }
       const fileInput = document.getElementById('newItemImage');
       const file = fileInput && fileInput.files && fileInput.files[0];
-      const finishAdd = (imageValue) => {
+      const finishAdd = async (imageValue) => {
         const item = { id: `m${Date.now()}`, category: cat, name, price, description, available: true, image: imageValue || '' };
-        state.menu.push(item);
-        setState({ addingCat: null });
-        insertMenuItemDB(item);
+        const ok = await insertMenuItemDB(item);
+        if (ok) {
+          state.menu.push(item);
+          setState({ addingCat: null });
+        } else {
+          setState({});
+        }
       };
       if (file) {
         readAndCompressImage(file).then(finishAdd).catch(() => finishAdd(''));
@@ -1192,11 +1345,16 @@ document.addEventListener('click', function (e) {
     case 'admin-waiter-edit-save': {
       const id = target.dataset.id;
       const name = document.getElementById('editWaiterName').value.trim();
-      if (!name) break;
-      const idx = waitersCache.findIndex((w) => w.id === id);
-      if (idx > -1) waitersCache[idx] = { ...waitersCache[idx], name };
-      setState({ editingWaiterId: null });
-      updateWaiterDB(id, { name });
+      if (!name || name.length > 50) { mostrarMensaje('El nombre del mesero debe tener entre 1 y 50 caracteres.'); break; }
+      updateWaiterDB(id, { name }).then((ok) => {
+        if (ok) {
+          const idx = waitersCache.findIndex((w) => w.id === id);
+          if (idx > -1) waitersCache[idx] = { ...waitersCache[idx], name };
+          setState({ editingWaiterId: null });
+        } else {
+          setState({});
+        }
+      });
       break;
     }
     case 'admin-waiter-delete': {
@@ -1215,15 +1373,21 @@ document.addEventListener('click', function (e) {
     case 'admin-waiter-add-save': {
       const id = document.getElementById('newWaiterId').value.trim();
       const name = document.getElementById('newWaiterName').value.trim();
-      if (!id || !name) break;
+      if (!id) { mostrarMensaje('El ID del mesero es obligatorio.'); break; }
+      if (!name || name.length > 50) { mostrarMensaje('El nombre del mesero debe tener entre 1 y 50 caracteres.'); break; }
       if (waitersCache.some((w) => w.id === id)) {
-        window.alert(`El ID "${id}" ya existe, usa otro.`);
+        mostrarMensaje(`El ID "${id}" ya existe, usa otro.`);
         break;
       }
       const waiter = { id, name };
-      waitersCache.push(waiter);
-      setState({ addingWaiter: false });
-      insertWaiterDB(waiter);
+      insertWaiterDB(waiter).then((ok) => {
+        if (ok) {
+          waitersCache.push(waiter);
+          setState({ addingWaiter: false });
+        } else {
+          setState({});
+        }
+      });
       break;
     }
     case 'sales-tab':
@@ -1299,15 +1463,25 @@ setInterval(function () {
   const params = new URLSearchParams(window.location.search);
   const mesaParam = params.get('mesa');
   const vistaParam = params.get('vista');
-  if (mesaParam && !Number.isNaN(Number(mesaParam))) {
+  const mesaNum = Number(mesaParam);
+  if (mesaParam && Number.isInteger(mesaNum) && TABLES.includes(mesaNum)) {
     state.view = 'customer';
-    state.table = Number(mesaParam);
+    state.table = mesaNum;
+  } else if (mesaParam) {
+    /* El QR trae un número de mesa que no existe (por ejemplo "0",
+       "99" o texto). En vez de romper la app, mandamos al cliente a
+       elegir su mesa manualmente y le avisamos qué pasó. */
+    state.view = 'tablePicker';
+    setTimeout(() => mostrarMensaje('El código QR no corresponde a una mesa válida. Elige tu mesa de la lista.'), 300);
   } else if (vistaParam === 'cocina') {
-    state.view = 'kitchen';
+    state.view = 'login';
+    state.pendingView = 'kitchen';
   } else if (vistaParam === 'mesero') {
-    state.view = 'waiter';
+    state.view = 'login';
+    state.pendingView = 'waiter';
   } else if (vistaParam === 'admin') {
-    state.view = 'admin';
+    state.view = 'login';
+    state.pendingView = 'admin';
   }
 
   const app = document.getElementById('app');
