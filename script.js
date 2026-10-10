@@ -435,6 +435,13 @@ let selectedPayment = 'efectivo';
    se abre el navegador de nuevo, vuelve a pedir la contraseña. */
 let unlockedViews = {};
 
+/* INTERRUPTOR DE CONTRASEÑAS
+   false = cocina / mesero / admin abren directo, sin pedir contraseña
+           (modo demo / exposición).
+   true  = vuelve a pedir la contraseña del personal (modo producción).
+   Todo el sistema de login sigue intacto; solo cambia este valor. */
+const REQUIRE_PASSWORD = false;
+
 function setState(patch) {
   Object.assign(state, patch);
   render();
@@ -1077,7 +1084,7 @@ document.addEventListener('click', async function (e) {
       break;
     case 'request-access': {
       const targetView = target.dataset.target; // 'kitchen' | 'waiter' | 'admin'
-      if (unlockedViews[targetView]) {
+      if (!REQUIRE_PASSWORD || unlockedViews[targetView]) {
         setState({ view: targetView });
       } else {
         setState({ view: 'login', pendingView: targetView, loginError: '' });
@@ -1474,14 +1481,14 @@ setInterval(function () {
     state.view = 'tablePicker';
     setTimeout(() => mostrarMensaje('El código QR no corresponde a una mesa válida. Elige tu mesa de la lista.'), 300);
   } else if (vistaParam === 'cocina') {
-    state.view = 'login';
-    state.pendingView = 'kitchen';
+    state.view = REQUIRE_PASSWORD ? 'login' : 'kitchen';
+    state.pendingView = REQUIRE_PASSWORD ? 'kitchen' : null;
   } else if (vistaParam === 'mesero') {
-    state.view = 'login';
-    state.pendingView = 'waiter';
+    state.view = REQUIRE_PASSWORD ? 'login' : 'waiter';
+    state.pendingView = REQUIRE_PASSWORD ? 'waiter' : null;
   } else if (vistaParam === 'admin') {
-    state.view = 'login';
-    state.pendingView = 'admin';
+    state.view = REQUIRE_PASSWORD ? 'login' : 'admin';
+    state.pendingView = REQUIRE_PASSWORD ? 'admin' : null;
   }
 
   const app = document.getElementById('app');
